@@ -1,0 +1,188 @@
+#!/bin/bash
+
+usage() {
+cat <<EOF
+
+Usage
+
+ $(basename $SCRIPT) [options]
+
+options:
+    -l 			List datasets (requires -p and optionally -s)
+    -p <PROJECT_NAME>  
+    -s <SUBJECT_ID> 	only list sessions for this subject
+
+    -g <EXPERIMENT_ID> 	Get a dataset (required -o)
+    -o <OUTPUT_DIR>    	directory to store the DICOM zip file
+
+  List sessions and Experiment IDs:
+    $(basename "$0") -p MYPROJECT -l  #all sessions in project MYPROJECT
+    $(basename "$0") -p MYPROJECT -l -s SUBJECT #all sessions by SUBJECT in MYPROJECT
+
+  Download a session
+    $(basename "$0") -g EXPERIMENT_ID -o OUTPUT_DIR
+
+EOF
+
+exit 1
+}
+
+load_credentials() {
+
+    CREDENTIALS=~/.xnatcli
+
+    if [ ! -f "$CREDENTIALS" ]; then
+        echo "ERROR: Cannot find $CREDENTIALS"
+        exit 1
+    fi
+
+    source "$CREDENTIALS"
+}
+
+get_subjects() {
+
+    curl -s -u "${USER}:${PASSWORD}" \
+        "${SERVER}/data/projects/${PROJECT}/subjects?format=csv"
+}
+
+get_experiments() {
+
+    curl -s -u "${USER}:${PASSWORD}" \
+        "${SERVER}/data/projects/${PROJECT}/experiments?format=csv&columns=subject_ID,date"
+}
+
+list_sessions() {
+
+    SUBJECTS=$(get_subjects)
+
+    EXPERIMENTS=$(get_experiments)
+
+    awk -F, -v filter_subject="$SUBJECT" '
+
+    BEGIN {
+        OFS="\t"
+    }
+
+    ARGIND==1 && FNR>1 {
+        subj[$1]=$3
+        next
+    }
+
+    ARGIND==2 && FNR==1 {
+
+        for(i=1;i<=NF;i++) {
+
+            if($i=="date")
+                date=i
+
+            if($i=="project")
+                project=i
+
+            if($i=="subject_ID")
+                sid=i
+
+            if($i=="ID" || $i=="xnat:subjectassessordata/id")
+                eid=i
+        }
+
+        print "Scan Date","Subject","Experiment","Project"
+        print "---------","-------","----------","-------"
+
+        next
+    }
+
+    ARGIND==2 {
+
+        subject=subj[$sid]
+
+        if(filter_subject != "" &&
+           subject != filter_subject)
+            next
+
+        print $date,subject,$eid,$project
+    }
+
+    ' <(printf "%s\n" "$SUBJECTS") \
+      <(printf "%s\n" "$EXPERIMENTS") |
+    column -t -s $'\t'
+}
+
+download_experiment() {
+
+    mkdir -p "$OUTPUT_DIR"
+
+    OUTFILE="${OUTPUT_DIR}/${EXPERIMENT_ID}.zip"
+
+    echo "Downloading ${EXPERIMENT_ID} ..."
+    echo
+
+    curl -L \
+         -u "${USER}:${PASSWORD}" \
+         "${SERVER}/data/experiments/${EXPERIMENT_ID}/scans/ALL/files?format=zip" \
+         -o "$OUTFILE"
+
+    echo
+    echo "Saved:"
+    echo "  $OUTFILE"
+}
+
+#
+# Main
+#
+SCRIPT="$0"
+
+while getopts "p:s:g:o:l" opt
+do
+    case "$opt" in
+
+        p)
+            PROJECT="$OPTARG"
+            ;;
+
+        s)
+            SUBJECT="$OPTARG"
+            ;;
+
+        g)
+            EXPERIMENT_ID="$OPTARG"
+            ;;
+
+        o)
+            OUTPUT_DIR="$OPTARG"
+            ;;
+
+        l)
+            LIST=1
+            ;;
+
+        *)
+            usage
+            ;;
+    esac
+done
+
+load_credentials
+
+if [ -n "$LIST" ]; then
+
+    [ -z "$PROJECT" ] && {
+        echo "ERROR: -p PROJECT is required with -l"
+        exit 1
+    }
+
+    list_sessions
+    exit 0
+fi
+
+if [ -n "$EXPERIMENT_ID" ]; then
+
+    [ -z "$OUTPUT_DIR" ] && {
+        echo "ERROR: -o OUTPUT_DIR is required with -g"
+        exit 1
+    }
+
+    download_experiment
+    exit 0
+fi
+
+usage
